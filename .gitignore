@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# IDE
+.idea/
+
+# Rendered output (too large for git)
+results/
+candidates_z8/
+z8_boundary_zoom/
+flower8_*/
+zoom_*/
+loop_*/
+
+# Generated images
+*.pgm
+*.png
+
+# Keep the SVG mask
+!Flower_union.svg
+
