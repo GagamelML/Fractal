@@ -89,3 +89,48 @@ def load_svg_mask(svg_path, width, height):
     ratio = mask.sum() / mask.size
     return mask, ratio
 
+
+def radial_fill(mask, center=None):
+    """
+    Fill all radial gaps in a mask relative to a center point.
+
+    For every angle from center, find the outermost True pixel and fill
+    everything from center to that radius. This ensures no radial gaps
+    exist during zoom interpolation.
+
+    Parameters
+    ----------
+    mask   : ndarray[bool] (H, W)
+    center : (cy, cx) tuple, defaults to image center
+
+    Returns
+    -------
+    filled : ndarray[bool] (H, W)
+    """
+    h, w = mask.shape
+    if center is None:
+        cy, cx = h / 2.0, w / 2.0
+    else:
+        cy, cx = center
+
+    # Build polar coords for every pixel
+    yy, xx = np.mgrid[0:h, 0:w]
+    dy = yy - cy
+    dx = xx - cx
+    r = np.sqrt(dy**2 + dx**2)
+    theta = np.arctan2(dy, dx)  # -pi..pi
+
+    # Quantise angle into bins
+    n_angles = max(w, h) * 4  # enough angular resolution
+    theta_bin = ((theta + np.pi) / (2 * np.pi) * n_angles).astype(int) % n_angles
+
+    # For each angle bin, find max radius that is in the mask
+    r_max = np.zeros(n_angles, dtype=np.float64)
+    mask_r = r.copy()
+    mask_r[~mask] = 0
+    np.maximum.at(r_max, theta_bin.ravel(), mask_r.ravel())
+
+    # Fill: pixel is in render mask if r <= r_max for its angle bin
+    filled = r <= r_max[theta_bin]
+    return filled
+

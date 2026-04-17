@@ -48,10 +48,12 @@ def _worker_init(gen_cls, gen_kwargs, color_names, folder, mask_svg):
     _worker_max_iter = gen_kwargs["max_iter"]
     _worker_folder = folder
     if mask_svg:
-        from mask import load_svg_mask
-        _worker_mask, _ = load_svg_mask(mask_svg,
+        from mask import load_svg_mask, radial_fill
+        display_mask, _ = load_svg_mask(mask_svg,
                                         gen_kwargs["width"],
                                         gen_kwargs["height"])
+        # Radial fill: ensure no gaps between center and any visible pixel
+        _worker_mask = radial_fill(display_mask)
     else:
         _worker_mask = None
 
@@ -62,13 +64,7 @@ def _worker_render(frame, scale):
     counts = _worker_gen.render(scale, mask=_worker_mask)
     for name, fn in _worker_colors.items():
         img = fn(counts, _worker_max_iter)
-        # Apply mask: set outside pixels to transparent black
-        if _worker_mask is not None:
-            import numpy as np
-            arr = np.array(img)
-            arr[~_worker_mask] = 0
-            from PIL import Image
-            img = Image.fromarray(arr, mode='RGB')
+        # Don't apply tight mask here – video.py does that per output frame
         img.save(os.path.join(_worker_folder, name, f"frame_{frame:04d}.png"))
     return frame, clock() - t0
 
