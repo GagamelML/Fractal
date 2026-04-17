@@ -62,7 +62,7 @@ class RenderPanel(QScrollArea):
 
         self.generator = QComboBox()
         self.generator.addItems(GENERATORS.keys())
-        self.generator.setCurrentText("flower")
+        self.generator.setCurrentText("julia")
         form.addRow("Generator:", self.generator)
 
         self.kernel = QComboBox()
@@ -284,8 +284,26 @@ class RenderPanel(QScrollArea):
                     if hi <= lo:
                         hi = lo + 1.0
                     grey[esc] = (np.clip((vals - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
-                from PIL import Image
+                from PIL import Image, ImageDraw, ImageFont
                 img = Image.fromarray(grey, mode='L')
+                # Stamp parameters
+                draw = ImageDraw.Draw(img)
+                try:
+                    font = ImageFont.truetype("consola.ttf", max(12, size // 40))
+                except Exception:
+                    font = ImageFont.load_default()
+                lines = [
+                    f"gen={gen_name} kernel={kwargs['kernel']} n={kwargs['power']}",
+                    f"c={kwargs['c']}",
+                    f"scale={scale:.4f}  iter={kwargs['max_iter']}",
+                ]
+                y = 4
+                for line in lines:
+                    bbox = draw.textbbox((0, 0), line, font=font)
+                    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                    draw.rectangle([2, y - 1, tw + 6, y + th + 1], fill=0)
+                    draw.text((4, y), line, fill=255, font=font)
+                    y += th + 3
                 path = os.path.join(preview_dir, f"preview_greyscale_{size}x{size}.png")
                 img.save(path)
                 _log(f"  Saved {os.path.basename(path)} ({clock()-t0:.2f}s)\n")
@@ -420,6 +438,28 @@ class RenderPanel(QScrollArea):
                         grey[esc] = (np.clip((vals - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
 
                     img = PILImage.fromarray(grey, mode='L')
+                    draw = PILImage.core  # unused, just to keep namespace
+                    from PIL import ImageDraw, ImageFont
+                    draw = ImageDraw.Draw(img)
+                    try:
+                        font = ImageFont.truetype("consola.ttf", max(12, size // 40))
+                    except Exception:
+                        font = ImageFont.load_default()
+                    lines = [f"#{fi}"]
+                    if i == 0:
+                        lines = [
+                            f"gen={gen_name} kernel={kwargs['kernel']} n={kwargs['power']}",
+                            f"c={kwargs['c']}",
+                            f"center={kwargs['center']}  zoom={zoom_factor}",
+                            f"scale={scale:.6f}  frame #{fi}",
+                        ]
+                    y = 4
+                    for line in lines:
+                        bbox = draw.textbbox((0, 0), line, font=font)
+                        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                        draw.rectangle([2, y - 1, tw + 6, y + th + 1], fill=0)
+                        draw.text((4, y), line, fill=255, font=font)
+                        y += th + 3
                     path = os.path.join(preview_dir, f"frame_{fi:04d}.png")
                     img.save(path)
                     saved.append(path)
