@@ -2,9 +2,11 @@
 
 from .julia import JuliaGenerator
 from .flower import FlowerGenerator
+from .mandelbrot import MandelbrotGenerator
 
 GENERATORS = {
     "julia": JuliaGenerator,
     "flower": FlowerGenerator,
+    "mandelbrot": MandelbrotGenerator,
 }
 

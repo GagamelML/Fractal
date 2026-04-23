@@ -22,9 +22,11 @@ class JuliaGenerator:
     """
 
     def __init__(self, *, c, center=0+0j, width=640, height=640,
-                 max_iter=512, power=2, kernel="poly", bailout=2.0):
+                 max_iter=512, power=2, kernel="poly", bailout=2.0,
+                 recenter=False):
         self.c = c
         self.center = center
+        self.recenter = recenter
         self.width = width
         self.height = height
         self.max_iter = max_iter
@@ -44,7 +46,10 @@ class JuliaGenerator:
 
     def render(self, scale, mask=None):
         """Return iteration-count array for the given scale."""
-        z_full = scale * (self._grid + self.center)
+        if self.recenter:
+            z_full = scale * self._grid + self.center
+        else:
+            z_full = scale * (self._grid + self.center)
         if mask is not None and not mask.all():
             counts = np.full(z_full.shape, self.max_iter, dtype=np.int16)
             z_sub = z_full[mask].copy()

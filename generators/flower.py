@@ -27,9 +27,11 @@ class FlowerGenerator:
     def __init__(self, *, c, center=0+0j, width=640, height=640,
                  max_iter=512, power=2, kernel="poly", bailout=2.0,
                  petals=8, mirror_segments=True,
-                 interest_angle=0, align_north="center"):
+                 interest_angle=0, align_north="center",
+                 recenter=False):
         self.c = c
         self.center = center
+        self.recenter = recenter
         self.width = width
         self.height = height
         self.max_iter = max_iter
@@ -104,7 +106,10 @@ class FlowerGenerator:
               f"({n_total / n_unique:.1f}× speedup)")
 
     def render(self, scale, mask=None):
-        z = scale * (self._master_grid + self.center)
+        if self.recenter:
+            z = scale * self._master_grid + self.center
+        else:
+            z = scale * (self._master_grid + self.center)
         # If mask provided, only compute pixels that are inside the mask
         if mask is not None:
             flat_mask = mask.ravel()
