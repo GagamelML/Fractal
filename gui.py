@@ -1969,7 +1969,7 @@ class ColoringPanel(QScrollArea):
             last = self._segments[-1] if self._segments else None
             if last is not None and not last.is_first:
                 seg.start_frame.setValue(
-                    last.start_frame.value() + last.transition_length.value() + 20)
+                    last.start_frame.value() + last.transition_length.value() + 40)
             else:
                 seg.start_frame.setValue(30)
         self._segments.append(seg)
@@ -2103,6 +2103,226 @@ class ColoringPanel(QScrollArea):
         return os.path.join(root, series)
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Stitch Panel  (transition between coloured series with zoom-overlay)
+# ═══════════════════════════════════════════════════════════════════════════════
+class StitchSegmentWidget(QGroupBox):
+    """One segment in a stitch program: a coloured-series folder plus the
+    frame range to take from it.  Non-first segments also carry a
+    ``transition_length`` that specifies how many frames of the *previous*
+    segment get the overlaid zoom-in of this segment's entry frame."""
+
+    removed = pyqtSignal(object)
+
+    def __init__(self, results_root, index, is_first=False, parent=None):
+        super().__init__(parent)
+        self.is_first = is_first
+        self.index = index
+        self._results_root = results_root
+        self.setTitle("Base series" if is_first else f"Series #{index + 1}")
+
+        form = QFormLayout(self)
+        form.setContentsMargins(8, 8, 8, 8)
+
+        self.series_combo = QComboBox()
+        self.series_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._populate_series()
+        form.addRow("Series / colour:", self.series_combo)
+
+        refresh_btn = QPushButton("\u21bb  Refresh list")
+        refresh_btn.clicked.connect(self._populate_series)
+        form.addRow("", refresh_btn)
+
+        self.start_frame = QSpinBox()
+        self.start_frame.setRange(0, 100000)
+        self.start_frame.setValue(0)
+        form.addRow("Entry frame:", self.start_frame)
+
+        self.end_frame = QSpinBox()
+        self.end_frame.setRange(0, 100000)
+        self.end_frame.setValue(100)
+        form.addRow("Exit frame:", self.end_frame)
+
+        if not is_first:
+            self.transition_length = QSpinBox()
+            self.transition_length.setRange(1, 10000)
+            self.transition_length.setValue(80)
+            self.transition_length.setToolTip(
+                "Number of frames at the end of the previous segment\n"
+                "over which this segment's entry frame grows from a few\n"
+                "pixels to full screen.")
+            form.addRow("Transition length:", self.transition_length)
+
+            remove_btn = QPushButton("\u2716  Remove")
+            remove_btn.setStyleSheet("color: #d77;")
+            remove_btn.clicked.connect(lambda: self.removed.emit(self))
+            form.addRow("", remove_btn)
+
+    def set_results_root(self, root):
+        self._results_root = root
+        self._populate_series()
+
+    def _populate_series(self):
+        current = self.series_combo.currentText()
+        self.series_combo.blockSignals(True)
+        self.series_combo.clear()
+        entries = []
+        root = self._results_root
+        if os.path.isdir(root):
+            for series in sorted(os.listdir(root)):
+                sfull = os.path.join(root, series)
+                if not os.path.isdir(sfull) or series.startswith("_"):
+                    continue
+                for sub in sorted(os.listdir(sfull)):
+                    subfull = os.path.join(sfull, sub)
+                    if (os.path.isdir(subfull) and not sub.startswith("_")
+                            and glob.glob(os.path.join(subfull,
+                                                      "frame_*.png"))):
+                        entries.append(f"{series}/{sub}")
+        self.series_combo.addItems(entries)
+        idx = self.series_combo.findText(current)
+        if idx >= 0:
+            self.series_combo.setCurrentIndex(idx)
+        self.series_combo.blockSignals(False)
+
+    def folder(self):
+        rel = self.series_combo.currentText().strip()
+        if not rel:
+            return None
+        return os.path.join(self._results_root, rel)
+
+    def to_dict(self):
+        d = {
+            "folder": self.folder() or "",
+            "start_frame": int(self.start_frame.value()),
+            "end_frame": int(self.end_frame.value()),
+        }
+        if not self.is_first:
+            d["transition_length"] = int(self.transition_length.value())
+        return d
+
+
+class StitchPanel(QScrollArea):
+    """Multi-series stitcher – zoom-overlay transitions between coloured
+    series.  Produces frames via stitch.py; output goes into
+    ``results/<output_name>/frames/`` ready for video.py."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        root_grp = QGroupBox("Results root")
+        root_form = QFormLayout(root_grp)
+        row = QHBoxLayout()
+        self.results_folder = QLineEdit(RESULTS_DIR)
+        browse_btn = QPushButton("Browse\u2026")
+        browse_btn.clicked.connect(self._pick_results_folder)
+        row.addWidget(self.results_folder, 1)
+        row.addWidget(browse_btn)
+        root_form.addRow("Folder:", row)
+        layout.addWidget(root_grp)
+
+        prog_grp = QGroupBox("Stitch program")
+        prog_layout = QVBoxLayout(prog_grp)
+        prog_layout.setContentsMargins(8, 8, 8, 8)
+
+        self._segments_container = QWidget()
+        self._segments_layout = QVBoxLayout(self._segments_container)
+        self._segments_layout.setContentsMargins(0, 0, 0, 0)
+        self._segments_layout.setSpacing(6)
+        prog_layout.addWidget(self._segments_container)
+
+        self.add_series_btn = QPushButton("\u2795  Add series")
+        self.add_series_btn.clicked.connect(lambda: self._add_segment(False))
+        prog_layout.addWidget(self.add_series_btn)
+
+        layout.addWidget(prog_grp)
+
+        opt_grp = QGroupBox("Options")
+        opt_form = QFormLayout(opt_grp)
+        self.output_name = QLineEdit()
+        self.output_name.setPlaceholderText("stitched_<timestamp>")
+        opt_form.addRow("Output name:", self.output_name)
+        layout.addWidget(opt_grp)
+
+        self.start_btn = QPushButton("\U0001f517  Start Stitching")
+        self.start_btn.setStyleSheet(
+            "padding: 8px; font-weight: bold; font-size: 14px;")
+        layout.addWidget(self.start_btn)
+
+        layout.addStretch()
+        self.setWidget(w)
+
+        self._segments = []
+        self._add_segment(is_first=True)
+        self._add_segment(is_first=False)
+
+    def _pick_results_folder(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Select results folder", RESULTS_DIR)
+        if path:
+            self.results_folder.setText(path)
+            for seg in self._segments:
+                seg.set_results_root(path)
+
+    def _add_segment(self, is_first=False):
+        is_first = bool(is_first) if is_first is True else (
+            not self._segments)
+        idx = len(self._segments)
+        seg = StitchSegmentWidget(
+            self.results_folder.text().strip(), idx, is_first=is_first)
+        if not is_first:
+            seg.removed.connect(self._remove_segment)
+        self._segments.append(seg)
+        self._segments_layout.addWidget(seg)
+
+    def _remove_segment(self, seg):
+        if seg.is_first:
+            return
+        if seg in self._segments:
+            self._segments.remove(seg)
+        self._segments_layout.removeWidget(seg)
+        seg.setParent(None)
+        seg.deleteLater()
+        for i, s in enumerate(self._segments):
+            s.index = i
+            if not s.is_first:
+                s.setTitle(f"Series #{i + 1}")
+
+    def build_program(self):
+        segments = [s.to_dict() for s in self._segments]
+        segments = [s for s in segments if s["folder"]]
+        prog = {"segments": segments}
+        out = self.output_name.text().strip()
+        if out:
+            prog["output_name"] = out
+        return prog
+
+    def _write_program_file(self):
+        import json
+        import time
+        programs_dir = os.path.join(PROJECT_DIR, "_programs")
+        os.makedirs(programs_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(programs_dir, f"stitch_{stamp}.json")
+        with open(path, "w") as f:
+            json.dump(self.build_program(), f, indent=2)
+        return path
+
+    def build_args(self):
+        prog = self.build_program()
+        if len(prog.get("segments", [])) < 2:
+            return None
+        path = self._write_program_file()
+        args = [path]
+        if self.output_name.text().strip():
+            args += ["--output-name", self.output_name.text().strip()]
+        return args
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2976,10 +3196,12 @@ class MainWindow(QMainWindow):
         self.set_panel = SetSelectionPanel()
         self.image_panel = ImageRenderingPanel()
         self.coloring_panel = ColoringPanel()
+        self.stitch_panel = StitchPanel()
         self.video_panel = VideoPanel()
         self.left_tabs.addTab(self.set_panel, "Set Selection")
         self.left_tabs.addTab(self.image_panel, "Image Rendering")
         self.left_tabs.addTab(self.coloring_panel, "Coloring")
+        self.left_tabs.addTab(self.stitch_panel, "Stitch")
         self.left_tabs.addTab(self.video_panel, "Video")
         self.left_tabs.setMaximumWidth(420)
         splitter.addWidget(self.left_tabs)
@@ -3025,6 +3247,7 @@ class MainWindow(QMainWindow):
 
         self.image_panel.start_btn.clicked.connect(self._start_render)
         self.coloring_panel.start_btn.clicked.connect(self._start_coloring)
+        self.stitch_panel.start_btn.clicked.connect(self._start_stitch)
         self.video_panel.start_btn.clicked.connect(self._start_video)
 
         self._process = None
@@ -3091,6 +3314,11 @@ class MainWindow(QMainWindow):
         if self._process and self._process.state() != QProcess.ProcessState.NotRunning:
             self.console.append_text("\n\u26a0  A process is already running.\n")
             return
+        # Snapshot the results/ tree so _on_finished can pick up the newly
+        # created series (after render) or the new colour sub-folder
+        # (after colorize).
+        self._last_script = script
+        self._snapshot_results()
         self._process = QProcess(self)
         self._process.setWorkingDirectory(PROJECT_DIR)
         self._process.readyReadStandardOutput.connect(self._on_stdout)
@@ -3104,6 +3332,94 @@ class MainWindow(QMainWindow):
             self._process.start(sys.executable, ["--run-script", script_path] + args)
         else:
             self._process.start(PYTHON, [script_path] + args)
+
+    def _snapshot_results(self):
+        """Record the current state of results/ as {series: set(subdirs)}."""
+        snap = {}
+        root = RESULTS_DIR
+        if os.path.isdir(root):
+            for s in os.listdir(root):
+                sfull = os.path.join(root, s)
+                if not os.path.isdir(sfull) or s.startswith("_"):
+                    continue
+                try:
+                    subs = set(d for d in os.listdir(sfull)
+                               if os.path.isdir(os.path.join(sfull, d))
+                               and not d.startswith("_"))
+                except OSError:
+                    subs = set()
+                snap[s] = subs
+        self._results_snapshot = snap
+
+    def _auto_select_after_finish(self):
+        """Diff current results/ against the pre-run snapshot and select
+        the newly-produced series + colour sub-folder in the render viewer."""
+        snap = getattr(self, "_results_snapshot", None) or {}
+        script = getattr(self, "_last_script", "")
+        root = RESULTS_DIR
+        if not os.path.isdir(root):
+            return
+
+        current = {}
+        for s in os.listdir(root):
+            sfull = os.path.join(root, s)
+            if not os.path.isdir(sfull) or s.startswith("_"):
+                continue
+            try:
+                subs = set(d for d in os.listdir(sfull)
+                           if os.path.isdir(os.path.join(sfull, d))
+                           and not d.startswith("_"))
+            except OSError:
+                subs = set()
+            current[s] = subs
+
+        # New series (didn't exist before)
+        new_series = [s for s in current if s not in snap]
+        # Pick target series
+        target_series = None
+        target_sub = None
+        if script == "render.py":
+            # Render creates a brand-new series folder.  Prefer greyscale view.
+            if new_series:
+                target_series = sorted(new_series)[-1]
+                if "greyscale" in current.get(target_series, set()):
+                    target_sub = "greyscale"
+                else:
+                    subs = sorted(current.get(target_series, set()))
+                    target_sub = subs[0] if subs else None
+        elif script == "colorize.py":
+            # Colorize adds a sub-folder to an existing series.
+            for s, subs in current.items():
+                added = subs - snap.get(s, set())
+                if added:
+                    target_series = s
+                    # First colour produced (sorted for determinism)
+                    target_sub = sorted(added)[0]
+                    break
+        elif script == "stitch.py":
+            if new_series:
+                target_series = sorted(new_series)[-1]
+                subs = current.get(target_series, set())
+                # Prefer 'frames' (the folder stitch.py writes to)
+                target_sub = "frames" if "frames" in subs else (
+                    sorted(subs)[0] if subs else None)
+
+        if not target_series:
+            # Fallback: keep old behaviour – pick the last alphabetical entry
+            if self.preview.render_viewer.series_combo.count() > 0:
+                self.preview.render_viewer.series_combo.setCurrentIndex(
+                    self.preview.render_viewer.series_combo.count() - 1)
+            return
+
+        rv = self.preview.render_viewer
+        idx = rv.series_combo.findText(target_series)
+        if idx >= 0:
+            rv.series_combo.setCurrentIndex(idx)
+        # Load the chosen sub-folder by simulating a button click
+        if target_sub:
+            folder = os.path.join(root, target_series, target_sub)
+            if os.path.isdir(folder):
+                rv.load_folder(folder)
 
     def _on_stdout(self):
         data = self._process.readAllStandardOutput().data().decode("utf-8", errors="replace")
@@ -3119,9 +3435,7 @@ class MainWindow(QMainWindow):
         self.preview.set_viewer._load_frames()
         self.preview.render_viewer._refresh_series()
         self.coloring_panel._refresh_series()
-        if self.preview.render_viewer.series_combo.count() > 0:
-            self.preview.render_viewer.series_combo.setCurrentIndex(
-                self.preview.render_viewer.series_combo.count() - 1)
+        self._auto_select_after_finish()
 
     def _start_render(self):
         sp = self.set_panel
@@ -3194,6 +3508,15 @@ class MainWindow(QMainWindow):
             self.console.append_text("\n\u26a0  Please set a frame folder first.\n")
             return
         self._run_script("video.py", args)
+
+    def _start_stitch(self):
+        args = self.stitch_panel.build_args()
+        if args is None:
+            self.console.append_text(
+                "\n\u26a0  Need at least two series (each with a selected "
+                "colour folder) to stitch.\n")
+            return
+        self._run_script("stitch.py", args)
 
     def _start_coloring(self):
         args = self.coloring_panel.build_args()
