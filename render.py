@@ -93,6 +93,11 @@ def _worker_colorize(frame, bounds):
         counts = npz["counts"]
     for name, fn in _worker_colors.items():
         img = fn(counts, _worker_max_iter, bounds=bounds)
+        if _worker_mask is not None:
+            from PIL import Image as _PImage
+            arr = np.array(img)
+            arr[~_worker_mask] = 0
+            img = _PImage.fromarray(arr, mode=img.mode)
         img.save(os.path.join(_worker_folder, name, f"frame_{frame:04d}.png"))
     return frame, clock() - t0
 
@@ -222,6 +227,17 @@ def render(args):
     for name in color_names:
         os.makedirs(os.path.join(folder, name), exist_ok=True)
     os.makedirs(os.path.join(folder, "_raw"), exist_ok=True)
+
+    # Persist the effective render mask (same radial-filled one used by
+    # the workers) so colorize.py can force those pixels to black later.
+    if args.mask_svg:
+        from mask import load_svg_mask, radial_fill
+        _dm, _ = load_svg_mask(args.mask_svg,
+                               gen_kwargs["width"], gen_kwargs["height"])
+        _full_mask = radial_fill(_dm)
+        np.save(os.path.join(folder, "_raw", "mask.npy"),
+                _full_mask.astype(bool))
+        print(f"Saved render mask -> {folder}/_raw/mask.npy")
 
     frames = [(f, args.scale_start * (args.zoom_factor ** f))
               for f in range(args.start_frame,

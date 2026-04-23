@@ -198,9 +198,32 @@ def detect_recursion(c, center, kernel, power, current_zf, log=None, scale_start
             log(f"  |λ| = {abs_lam:.10f}, arg(λ) = {arg_deg:.4f}°\n")
 
             if 1e-12 < abs_lam < 1.0:
-                k_exact = math.log(abs_lam) / math.log(current_zf)
+                # Rotation-aware visual loop length.
+                # One self-similarity step of the cycle: scale·|λ|, rotation arg(λ).
+                # Find smallest n_rot so that n_rot·arg(λ) ≈ multiple of 360°.
+                if abs(arg_deg) < 0.01:
+                    n_rot = 1
+                else:
+                    n_rot = None
+                    for n in range(1, 361):
+                        total_rot = n * arg_deg
+                        if abs(total_rot - round(total_rot / 360) * 360) < 0.5:
+                            n_rot = n
+                            break
+                    if n_rot is None:
+                        n_rot = max(1, round(360 / abs(arg_deg)))
+
+                total_zoom = abs_lam ** n_rot        # shrink factor per full visual loop
+                k_exact = math.log(total_zoom) / math.log(current_zf)
                 k = max(1, round(k_exact))
-                optimal_zf = abs_lam ** (1.0 / k)
+                optimal_zf = total_zoom ** (1.0 / k)
+
+                log(f"  Rotation loop: {n_rot} self-sim steps "
+                    f"= {n_rot * arg_deg:.1f}° "
+                    f"≈ {round(n_rot * arg_deg / 360)}×360°\n")
+                log(f"  Total zoom per loop: {total_zoom:.10f}\n")
+                log(f"  k_exact = {k_exact:.2f} → k = {k} frames per loop\n")
+                log(f"  Optimal zoom factor: {optimal_zf:.9f}\n")
 
                 results.append({
                     "type": "attracting_cycle",
@@ -208,10 +231,10 @@ def detect_recursion(c, center, kernel, power, current_zf, log=None, scale_start
                     "multiplier": lam,
                     "abs_lam": abs_lam,
                     "arg_lam_deg": arg_deg,
-                    "n_rot": 1,
+                    "n_rot": n_rot,
                     "k": k,
                     "optimal_zf": optimal_zf,
-                    "quality": "exact",
+                    "quality": "exact" if abs(arg_deg * n_rot - round(arg_deg * n_rot / 360) * 360) < 0.01 else "approximate",
                 })
         elif not escaped:
             log(f"  No attracting cycle found (orbit did not converge).\n")
@@ -256,7 +279,7 @@ def detect_recursion(c, center, kernel, power, current_zf, log=None, scale_start
     log(f"\n  ═══ Best match: {typ} ═══\n")
     log(f"  Loop: {best['k']} frames at zoom_factor = "
         f"{best['optimal_zf']:.9f}\n")
-    if best["type"] == "repelling_fixed":
+    if best["type"] in ("repelling_fixed", "attracting_cycle"):
         log(f"  ({best['n_rot']} self-similarity steps "
             f"× {best['arg_lam_deg']:.1f}° each)\n")
     log(f"  Loop starts at frame {loop_start} "

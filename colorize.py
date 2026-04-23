@@ -49,17 +49,38 @@ _worker_max_iter = None
 _worker_colors = None        # classic mode: dict[name -> fn]
 _worker_program = None       # program mode: list[segment]
 _worker_output_name = None   # program mode: output subfolder name
+_worker_mask = None          # bool ndarray (True = keep, False = force black)
 
 
 def _worker_init(folder, max_iter, color_names,
                  program=None, output_name=None):
     global _worker_folder, _worker_max_iter, _worker_colors
-    global _worker_program, _worker_output_name
+    global _worker_program, _worker_output_name, _worker_mask
     _worker_folder = folder
     _worker_max_iter = max_iter
     _worker_colors = {n: COLORIZERS[n] for n in (color_names or [])}
     _worker_program = program
     _worker_output_name = output_name
+    mask_path = os.path.join(folder, "_raw", "mask.npy")
+    if os.path.isfile(mask_path):
+        try:
+            _worker_mask = np.load(mask_path).astype(bool)
+        except Exception:
+            _worker_mask = None
+    else:
+        _worker_mask = None
+
+
+def _apply_mask_to_image(img):
+    """If a render mask exists, force masked-out pixels to pitch black."""
+    if _worker_mask is None:
+        return img
+    arr = np.array(img)
+    if arr.ndim == 2:
+        arr[~_worker_mask] = 0
+    else:
+        arr[~_worker_mask] = 0  # broadcasts over channel axis
+    return Image.fromarray(arr, mode=img.mode)
 
 
 def _raw_path(folder, frame):
@@ -81,6 +102,7 @@ def _worker_colorize_classic(frame, bounds):
         counts = npz["counts"]
     for name, fn in _worker_colors.items():
         img = fn(counts, _worker_max_iter, bounds=bounds)
+        img = _apply_mask_to_image(img)
         img.save(os.path.join(_worker_folder, name, f"frame_{frame:04d}.png"))
     return frame, clock() - t0
 
@@ -144,6 +166,7 @@ def _worker_colorize_program(frame, bounds):
     else:
         img_b = _call_segment(b, counts, _worker_max_iter, bounds)
         img = _blend(img_a, img_b, w)
+    img = _apply_mask_to_image(img)
     img.save(os.path.join(
         _worker_folder, _worker_output_name, f"frame_{frame:04d}.png"))
     return frame, clock() - t0
