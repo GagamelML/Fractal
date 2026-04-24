@@ -21,6 +21,53 @@ from generators import GENERATORS
 from colorizers import COLORIZERS, _calc_bounds
 
 
+
+# -- Additional constants (panning c during a series) -----------------------
+def parse_extra_constants(json_str):
+    """Parse a JSON list of panning transitions.
+
+    Each item: {c_real, c_imag, start, length}."""
+    import json as _json
+    if not json_str:
+        return []
+    data = _json.loads(json_str)
+    result = []
+    for item in data:
+        result.append({
+            'c_real': float(item['c_real']),
+            'c_imag': float(item['c_imag']),
+            'start':  int(item.get('start', 0)),
+            'length': max(0, int(item.get('length', 0))),
+        })
+    result.sort(key=lambda d: d['start'])
+    return result
+
+
+def extras_for_meta(args):
+    try:
+        return parse_extra_constants(getattr(args, 'extra_constants', '') or '')
+    except Exception:
+        return []
+
+
+def compute_c_for_frame(base_c, extras, frame):
+    """Interpolate c for *frame* through chained transitions."""
+    current = complex(base_c)
+    for ex in extras:
+        target = complex(ex['c_real'], ex['c_imag'])
+        s0 = ex['start']
+        L = ex['length']
+        end = s0 + L
+        if frame >= end or L <= 0:
+            current = target
+        elif frame <= s0:
+            break
+        else:
+            t = (frame - s0) / L
+            current = current * (1.0 - t) + target * t
+            break
+    return current
+
 # ── defaults (edit here for quick runs) ──────────────────────────────────────
 DEFAULTS = dict(
     generator="flower",
@@ -77,9 +124,11 @@ def _raw_path(folder, frame):
     return os.path.join(folder, "_raw", f"frame_{frame:04d}.npz")
 
 
-def _worker_render_counts(frame, scale):
+def _worker_render_counts(frame, scale, c_real=None, c_imag=None):
     """Pass 1: render counts, save compressed, return (frame, bounds, elapsed)."""
     t0 = clock()
+    if c_real is not None and c_imag is not None:
+        _worker_gen.c = complex(c_real, c_imag)
     counts = _worker_gen.render(scale, mask=_worker_mask)
     np.savez_compressed(_raw_path(_worker_folder, frame), counts=counts)
     bounds = _calc_bounds(counts, _worker_max_iter)
@@ -173,6 +222,7 @@ def _write_meta(folder, args, gen_kwargs, frame_bounds):
         "recenter": args.recenter,
         "mask_svg": args.mask_svg,
         "scale_smoothing_render": args.scale_smoothing,
+        "extra_constants": extras_for_meta(args),
         "flower": {
             "petals": args.petals,
             "mirror_segments": args.mirror_segments,
@@ -239,6 +289,18 @@ def render(args):
                 _full_mask.astype(bool))
         print(f"Saved render mask -> {folder}/_raw/mask.npy")
 
+    # Parse panning constants (if any). When extras are present the loop
+    # copy optimisation is disabled because c differs per frame.
+    extras = parse_extra_constants(getattr(args, 'extra_constants', '') or '')
+    base_c = complex(args.c_real, args.c_imag)
+    frame_c = {f: compute_c_for_frame(base_c, extras, f)
+               for f in range(args.start_frame,
+                              args.start_frame + args.num_frames,
+                              args.frame_step)}
+    if extras:
+        print(f'Panning: {len(extras)} extra constant transition(s). '
+              f'Loop optimisation disabled.')
+
     frames = [(f, args.scale_start * (args.zoom_factor ** f))
               for f in range(args.start_frame,
                              args.start_frame + args.num_frames,
@@ -247,6 +309,8 @@ def render(args):
     # ── Loop optimisation: if --loop-period is set, only render one period ──
     loop_period = getattr(args, 'loop_period', 0) or 0
     loop_start = getattr(args, 'loop_start', 0) or 0
+    if extras:
+        loop_period = 0
     frames_to_render = frames
     frames_to_copy = []  # (target_frame, source_frame)
     if loop_period > 0 and len(frames) > loop_start + loop_period:
@@ -277,7 +341,8 @@ def render(args):
     if n_workers <= 1:
         _worker_init(gen_cls, gen_kwargs, color_names, folder, args.mask_svg)
         for i, (frame, scale) in enumerate(frames_to_render, 1):
-            f, bounds, elapsed = _worker_render_counts(frame, scale)
+            c_f = frame_c[frame]
+            f, bounds, elapsed = _worker_render_counts(frame, scale, c_f.real, c_f.imag)
             frame_bounds[f] = bounds
             print(f"[{i}/{n_render}] frame {f:3d}  scale={scale:.6f}  ({elapsed:.1f}s)")
     else:
@@ -287,7 +352,7 @@ def render(args):
             initializer=_worker_init,
             initargs=(gen_cls, gen_kwargs, color_names, folder, args.mask_svg),
         ) as pool:
-            futures = {pool.submit(_worker_render_counts, f, s): f for f, s in frames_to_render}
+            futures = {pool.submit(_worker_render_counts, f, s, frame_c[f].real, frame_c[f].imag): f for f, s in frames_to_render}
             for fut in as_completed(futures):
                 f, bounds, elapsed = fut.result()
                 frame_bounds[f] = bounds
@@ -407,6 +472,9 @@ def parse_args():
                    help="If >0, only render this many frames then copy for the rest (loop optimisation)")
     p.add_argument("--loop-start", type=int, default=0,
                    help="Frame index where the loop begins (frames before this are always rendered)")
+    p.add_argument("--extra-constants", type=str, default="",
+                   help="JSON list of panning constants: "
+                        "[{c_real, c_imag, start, length}, ...]")
     p.add_argument("--series-name", type=str, default="",
                    help="Override the auto-generated series folder name under results/.")
     return p.parse_args()

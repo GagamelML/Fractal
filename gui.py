@@ -987,6 +987,22 @@ class SetSelectionPanel(QScrollArea):
 
         layout.addWidget(grp)
 
+        # -- Additional Constants (pan c during the series) ----------------
+        self.extra_const_group = QGroupBox("Additional Constants")
+        ec_layout = QVBoxLayout(self.extra_const_group)
+        ec_layout.setContentsMargins(8, 8, 8, 8)
+        ec_layout.setSpacing(4)
+        self._extra_const_container = QWidget()
+        self._extra_const_vbox = QVBoxLayout(self._extra_const_container)
+        self._extra_const_vbox.setContentsMargins(0, 0, 0, 0)
+        self._extra_const_vbox.setSpacing(4)
+        ec_layout.addWidget(self._extra_const_container)
+        self._extra_const_rows = []
+        self.add_constant_btn = QPushButton("+ Add constant")
+        self.add_constant_btn.clicked.connect(lambda: self._add_extra_constant())
+        ec_layout.addWidget(self.add_constant_btn)
+        layout.addWidget(self.extra_const_group)
+
         # ── Flower Options (shown only when generator == "flower") ───────────
         self.flower_group = QGroupBox("Flower Options")
         flower_form = QFormLayout(self.flower_group)
@@ -1103,6 +1119,50 @@ class SetSelectionPanel(QScrollArea):
 
         # Will be set by MainWindow to point at the sibling panel
         self._image_panel = None
+
+    def _add_extra_constant(self, c_real=0.0, c_imag=0.0, start=0, length=10):
+        """Create a new 'extra constant' row."""
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        cr = QDoubleSpinBox(); cr.setRange(-5, 5); cr.setDecimals(7); cr.setSingleStep(0.01); cr.setValue(c_real)
+        ci = QDoubleSpinBox(); ci.setRange(-5, 5); ci.setDecimals(7); ci.setSingleStep(0.01); ci.setValue(c_imag)
+        ts = QSpinBox(); ts.setRange(0, 100000); ts.setValue(start)
+        tl = QSpinBox(); tl.setRange(0, 100000); tl.setValue(length)
+        cr.setToolTip('Target c real'); ci.setToolTip('Target c imag')
+        ts.setToolTip('Transition start frame'); tl.setToolTip('Transition length (frames)')
+        rm = QPushButton('x'); rm.setFixedWidth(24)
+        h.addWidget(QLabel('c:'))
+        h.addWidget(cr, 1); h.addWidget(ci, 1)
+        h.addWidget(QLabel('start:')); h.addWidget(ts)
+        h.addWidget(QLabel('len:')); h.addWidget(tl)
+        h.addWidget(rm)
+        entry = {'widget': row, 'c_real': cr, 'c_imag': ci,
+                 'start': ts, 'length': tl}
+        rm.clicked.connect(lambda _=False, e=entry: self._remove_extra_constant(e))
+        self._extra_const_vbox.addWidget(row)
+        self._extra_const_rows.append(entry)
+        return entry
+
+    def _remove_extra_constant(self, entry):
+        if entry in self._extra_const_rows:
+            self._extra_const_rows.remove(entry)
+        entry['widget'].setParent(None)
+        entry['widget'].deleteLater()
+
+    def extra_constants_json(self):
+        """Return the current panning transitions as a JSON string, or ''."""
+        import json as _json
+        rows = []
+        for e in self._extra_const_rows:
+            rows.append({
+                'c_real': e['c_real'].value(),
+                'c_imag': e['c_imag'].value(),
+                'start':  e['start'].value(),
+                'length': e['length'].value(),
+            })
+        return _json.dumps(rows) if rows else ''
 
     def _toggle_generator_options(self, *_args):
         gen = self.generator.currentText()
@@ -1499,6 +1559,14 @@ class SetSelectionPanel(QScrollArea):
         scale_start = self.scale_start.value()
         zoom_factor = self._image_panel.zoom_factor.value() if self._image_panel else 0.92
         mask_path = self._image_panel.mask_svg.text().strip() if self._image_panel else ""
+        # Snapshot panning transitions so the preview matches the full render.
+        try:
+            from render import parse_extra_constants, compute_c_for_frame
+            _extras = parse_extra_constants(self.extra_constants_json())
+        except Exception:
+            _extras = []
+            compute_c_for_frame = None
+        _base_c = kwargs["c"]
 
         def _do_render():
             try:
@@ -1540,7 +1608,12 @@ class SetSelectionPanel(QScrollArea):
                 saved = []
                 for i, fi in enumerate(frame_indices):
                     scale = scale_start * (zoom_factor ** fi)
-                    _log(f"  [{i+1}/{len(frame_indices)}] frame {fi}, scale={scale:.6f}\u2026\n")
+                    if _extras and compute_c_for_frame is not None:
+                        gen.c = compute_c_for_frame(_base_c, _extras, fi)
+                    _msg = f"  [{i+1}/{len(frame_indices)}] frame {fi}, scale={scale:.6f}"
+                    if _extras:
+                        _msg += f", c={gen.c}"
+                    _log(_msg + "\u2026\n")
                     t0 = clock()
                     counts = gen.render(scale, mask=mask)
                     esc = counts < kwargs["max_iter"]
@@ -1776,6 +1849,12 @@ class ImageRenderingPanel(QScrollArea):
         name = self.series_name.text().strip()
         if name:
             args += ["--series-name", name]
+        try:
+            ec = sp.extra_constants_json()
+        except AttributeError:
+            ec = ''
+        if ec:
+            args += ["--extra-constants", ec]
         return args
 
 
@@ -3447,6 +3526,19 @@ class MainWindow(QMainWindow):
         current_zf = rp.zoom_factor.value()
         ss = rp.scale_start.value()
 
+        # Skip the recursion check when the user has configured a c-panning
+        # sequence -- loops are disabled in render.py in that case anyway.
+        extras_json = ''
+        try:
+            extras_json = sp.extra_constants_json()
+        except AttributeError:
+            pass
+        args = rp.build_args()
+        if extras_json:
+            self.console.append_text(
+                "\n" + "Additional constants present -- skipping recursion check.\n")
+            self._run_script("render.py", args)
+            return
         self.console.append_text("\n\U0001f50d Pre-render recursion check\u2026\n")
         rec = detect_recursion(c, center, kernel, power, current_zf,
                                log=lambda msg: self.console.append_text(msg),
