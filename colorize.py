@@ -262,6 +262,38 @@ def colorize_series(folder, color_names=None, smoothing=0.7, workers=12,
                          key=lambda s: int(s.get("start_frame", 0)))
         program[0]["start_frame"] = 0
         program[0]["transition_length"] = 0
+
+        # Keep an unmodified copy of the user-facing program (frame indices
+        # in *rendered-image* units) for persistence; below we translate
+        # the live `program` to absolute frame numbers for processing.
+        import copy as _copy
+        program_user = _copy.deepcopy(program)
+
+        # Translate user-facing segment indices (which count *rendered*
+        # images, ignoring any --start-frame / --frame-step gaps) into
+        # the absolute frame numbers stored on disk.  E.g. if rendering
+        # was started at frame 5 with step 1 and the user specified a
+        # segment starting at rendered-image #10, that maps to absolute
+        # frame 5 + 10 = frames_sorted[10].
+        frames_sorted = sorted(frames)
+        n_rendered = len(frames_sorted)
+
+        def _rendered_to_abs(idx):
+            i = max(0, min(int(idx), n_rendered - 1))
+            return frames_sorted[i]
+
+        for seg in program:
+            user_start = int(seg.get("start_frame", 0))
+            user_tl = int(seg.get("transition_length", 0))
+            abs_start = _rendered_to_abs(user_start)
+            if user_tl > 0:
+                abs_end = _rendered_to_abs(user_start + user_tl)
+                abs_tl = max(0, abs_end - abs_start)
+            else:
+                abs_tl = 0
+            seg["start_frame"] = abs_start
+            seg["transition_length"] = abs_tl
+
         if output_name is None:
             output_name = _auto_output_name(program)
         os.makedirs(os.path.join(folder, output_name), exist_ok=True)
@@ -271,7 +303,7 @@ def colorize_series(folder, color_names=None, smoothing=0.7, workers=12,
                       "w") as f:
                 json.dump({"output_name": output_name,
                            "smoothing": smoothing,
-                           "segments": program}, f, indent=2)
+                           "segments": program_user}, f, indent=2)
         except OSError:
             pass
     else:
