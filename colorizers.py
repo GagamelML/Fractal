@@ -226,6 +226,88 @@ def red_white_black(counts, max_iter, *, invert=False, force_bg=None,
     return Image.fromarray(rgb, mode='RGB')
 
 
+def sunset(counts, max_iter, *, invert=False, force_bg=None,
+           interior_color=(40, 18, 50), bounds=None):
+    """Cinematic sunset: plum haze -> warm rose -> coral -> soft yellow.
+    Has a hint of cool at the dark end for visual depth, then turns
+    fully warm."""
+    stops = [(0.00, (55,  25,  75)),    # plum / purple haze
+             (0.25, (140, 55,  90)),    # warm wine
+             (0.55, (235, 110, 90)),    # coral
+             (0.80, (250, 175, 95)),    # warm orange
+             (1.00, (252, 230, 160))]   # soft yellow
+    h, w = counts.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    rgb[counts >= max_iter] = _resolve_bg(force_bg, interior_color)
+    t, esc = _normalize(counts, max_iter, bounds=bounds)
+    if t is not None:
+        if invert: t = 1.0 - t
+        rgb[esc] = _gradient(t, stops)
+    rgb = _apply_forced_bg(rgb, counts, max_iter, t, esc, force_bg)
+    return Image.fromarray(rgb, mode='RGB')
+
+
+def terracotta(counts, max_iter, *, invert=False, force_bg=None,
+               interior_color=(45, 25, 18), bounds=None):
+    """Mediterranean earthenware: deep brown-red -> brick -> sand -> cream.
+    Earthy, low-saturation, calm."""
+    stops = [(0.00, (70,  30,  25)),    # dark earth
+             (0.30, (155, 75,  55)),    # brick / tile red
+             (0.60, (210, 150, 105)),   # warm sand
+             (0.85, (235, 205, 165)),   # pale sand
+             (1.00, (245, 230, 200))]   # cream
+    h, w = counts.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    rgb[counts >= max_iter] = _resolve_bg(force_bg, interior_color)
+    t, esc = _normalize(counts, max_iter, bounds=bounds)
+    if t is not None:
+        if invert: t = 1.0 - t
+        rgb[esc] = _gradient(t, stops)
+    rgb = _apply_forced_bg(rgb, counts, max_iter, t, esc, force_bg)
+    return Image.fromarray(rgb, mode='RGB')
+
+
+def spice_market(counts, max_iter, *, invert=False, force_bg=None,
+                 interior_color=(45, 25, 15), bounds=None):
+    """Spice-market saturation, running *backwards* through warm:
+    curry yellow-green -> saffron -> paprika -> chili -> maroon.
+    Visually dynamic because it traverses warm hues from yellow to red."""
+    stops = [(0.00, (110, 100, 35)),    # curry / mustard
+             (0.25, (200, 160, 55)),    # saffron
+             (0.50, (215, 110, 45)),    # paprika
+             (0.75, (175, 50,  35)),    # chili red
+             (1.00, (95,  25,  25))]    # deep maroon
+    h, w = counts.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    rgb[counts >= max_iter] = _resolve_bg(force_bg, interior_color)
+    t, esc = _normalize(counts, max_iter, bounds=bounds)
+    if t is not None:
+        if invert: t = 1.0 - t
+        rgb[esc] = _gradient(t, stops)
+    rgb = _apply_forced_bg(rgb, counts, max_iter, t, esc, force_bg)
+    return Image.fromarray(rgb, mode='RGB')
+
+
+def tropical_sunset(counts, max_iter, *, invert=False, force_bg=None,
+                    interior_color=(60, 20, 40), bounds=None):
+    """Saturated tropical sunset, fully warm end-to-end:
+    warm magenta -> coral -> mango -> goldenrod."""
+    stops = [(0.00, (120, 35,  75)),    # warm magenta / fuchsia
+             (0.30, (215, 75,  85)),    # rosy red
+             (0.55, (245, 130, 70)),    # coral
+             (0.80, (250, 185, 70)),    # mango
+             (1.00, (245, 220, 110))]   # goldenrod
+    h, w = counts.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    rgb[counts >= max_iter] = _resolve_bg(force_bg, interior_color)
+    t, esc = _normalize(counts, max_iter, bounds=bounds)
+    if t is not None:
+        if invert: t = 1.0 - t
+        rgb[esc] = _gradient(t, stops)
+    rgb = _apply_forced_bg(rgb, counts, max_iter, t, esc, force_bg)
+    return Image.fromarray(rgb, mode='RGB')
+
+
 # ---------------------------------------------------------------------------
 #  Registry
 # ---------------------------------------------------------------------------
@@ -236,4 +318,8 @@ COLORIZERS = {
     "log_fire":               log_fire,
     "black_blue_gold_white":  black_blue_gold_white,
     "red_white_black":        red_white_black,
+    "sunset":                 sunset,
+    "terracotta":             terracotta,
+    "spice_market":           spice_market,
+    "tropical_sunset":        tropical_sunset,
 }

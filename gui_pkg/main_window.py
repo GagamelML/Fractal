@@ -7,6 +7,8 @@ from PyQt6.QtCore import Qt, QProcess
 from PyQt6.QtGui import QPalette, QColor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QSplitter, QTabWidget, QMessageBox,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QFileDialog,
 )
 
 from .common import PROJECT_DIR, RESULTS_DIR, SCRIPT_DIR, PYTHON
@@ -16,6 +18,46 @@ from .panels import (
     StitchPanel, VideoPanel,
 )
 from .viewers import TabbedPreview, ConsoleWidget
+
+
+class ResumeDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.WindowTitleHint)
+        self.setWindowTitle("Resume Render")
+        layout = QVBoxLayout(self)
+
+        label = QLabel(
+            "Select the folder containing the rendered frames to resume from:")
+        layout.addWidget(label)
+
+        self.folder_edit = QLineEdit()
+        layout.addWidget(self.folder_edit)
+
+        btn_browse = QPushButton("Browse\u2026")
+        btn_browse.clicked.connect(self._browse_folder)
+        layout.addWidget(btn_browse)
+
+        button_box = QHBoxLayout()
+        layout.addLayout(button_box)
+
+        btn_ok = QPushButton("Resume")
+        btn_ok.clicked.connect(self.accept)
+        button_box.addWidget(btn_ok)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        button_box.addWidget(btn_cancel)
+
+        self.setLayout(layout)
+
+    def _browse_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Folder", self.folder_edit.text())
+        if folder:
+            self.folder_edit.setText(folder)
+
+    def folder(self):
+        return self.folder_edit.text().strip()
 
 
 class MainWindow(QMainWindow):
@@ -79,6 +121,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
 
         self.image_panel.start_btn.clicked.connect(self._start_render)
+        self.image_panel.resume_btn.clicked.connect(self._resume_render)
         self.coloring_panel.start_btn.clicked.connect(self._start_coloring)
         self.stitch_panel.start_btn.clicked.connect(self._start_stitch)
         self.video_panel.start_btn.clicked.connect(self._start_video)
@@ -331,6 +374,26 @@ class MainWindow(QMainWindow):
             self.console.append_text("\n\u26a0  Please set a frame folder first.\n")
             return
         self._run_script("video.py", args)
+
+    def _resume_render(self):
+        dlg = ResumeDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        folder = dlg.folder()
+        if not folder:
+            self.console.append_text("\n\u26a0  No folder selected.\n")
+            return
+        meta_path = os.path.join(folder, "_raw", "meta.json")
+        if not os.path.isfile(meta_path):
+            QMessageBox.warning(
+                self, "Resume Rendering",
+                f"No _raw/meta.json found in:\n{folder}\n\n"
+                "Only series rendered after the raw-data update can be resumed.")
+            return
+        rp = self.image_panel
+        args = ["--resume", folder, "--workers", str(rp.workers.value())]
+        self.console.append_text(f"\n\u21bb  Resuming render from {folder}\u2026\n")
+        self._run_script("render.py", args)
 
     def _start_stitch(self):
         args = self.stitch_panel.build_args()

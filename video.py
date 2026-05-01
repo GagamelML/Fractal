@@ -163,6 +163,10 @@ def main(args):
 
     if args.output:
         output = args.output
+        # pyav needs a file extension to pick a container; default to .mp4
+        if not os.path.splitext(output)[1]:
+            output += ".mp4"
+            print(f"No extension on --output; using '{output}'")
     else:
         parent = os.path.dirname(args.folder.rstrip("/\\"))
         base = (os.path.basename(parent) + "_"

@@ -887,6 +887,14 @@ class ImageRenderingPanel(QScrollArea):
         self.start_btn.setStyleSheet("padding: 8px; font-weight: bold; font-size: 14px;")
         layout.addWidget(self.start_btn)
 
+        # ── Resume button ───────────────────────────────────────────────────
+        self.resume_btn = QPushButton("\u21bb  Resume Rendering\u2026")
+        self.resume_btn.setToolTip(
+            "Resume an interrupted render. Pick the existing results/<series> "
+            "folder; missing frames will be detected from _raw/meta.json and "
+            "rendering will continue.")
+        layout.addWidget(self.resume_btn)
+
         layout.addStretch()
         self.setWidget(w)
 
@@ -1595,8 +1603,24 @@ class VideoPanel(QScrollArea):
         self.start_btn.setStyleSheet("padding: 8px; font-weight: bold; font-size: 14px;")
         layout.addWidget(self.start_btn)
 
+        # Playback launcher
+        self.playback_btn = QPushButton("🎬  Video Playback…")
+        self.playback_btn.setStyleSheet("padding: 8px; font-size: 13px;")
+        self.playback_btn.clicked.connect(self._open_playback)
+        layout.addWidget(self.playback_btn)
+
         layout.addStretch()
         self.setWidget(w)
+
+    def _open_playback(self):
+        # Local import to avoid pulling cv2 into module load if unused
+        from .playback import PlaybackDialog
+        dlg = PlaybackDialog(self)
+        # Non-modal so the main window remains usable while playback runs
+        dlg.setModal(False)
+        dlg.show()
+        # Keep a reference so the dialog isn't garbage-collected
+        self._playback_dialog = dlg
 
     def _pick_folder(self):
         path = QFileDialog.getExistingDirectory(self, "Select frame folder", RESULTS_DIR)

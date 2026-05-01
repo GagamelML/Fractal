@@ -259,7 +259,65 @@ def build_gen_kwargs(args):
     return common
 
 
+def _apply_resume(args):
+    """If --resume <folder> is set, load meta.json and override args.
+
+    Returns the absolute path to the resume folder (or None)."""
+    resume = getattr(args, "resume", None) or ""
+    if not resume:
+        return None
+    if not os.path.isabs(resume) and not os.path.exists(resume):
+        cand = os.path.join("results", resume)
+        if os.path.exists(cand):
+            resume = cand
+    meta_path = os.path.join(resume, "_raw", "meta.json")
+    if not os.path.isfile(meta_path):
+        raise SystemExit(f"Cannot resume: {meta_path} not found.")
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    args.generator   = meta.get("generator", args.generator)
+    args.kernel      = meta.get("kernel", args.kernel)
+    args.power       = int(meta.get("power", args.power))
+    args.bailout     = float(meta.get("bailout", args.bailout))
+    cr, ci           = meta.get("c", [args.c_real, args.c_imag])
+    args.c_real, args.c_imag = float(cr), float(ci)
+    ce_r, ce_i       = meta.get("center", [args.center_real, args.center_imag])
+    args.center_real, args.center_imag = float(ce_r), float(ce_i)
+    args.width       = int(meta.get("width", args.width))
+    args.height      = int(meta.get("height", args.height))
+    args.max_iter    = int(meta.get("max_iter", args.max_iter))
+    args.scale_start = float(meta.get("scale_start", args.scale_start))
+    args.zoom_factor = float(meta.get("zoom_factor", args.zoom_factor))
+    args.num_frames  = int(meta.get("num_frames", args.num_frames))
+    args.start_frame = int(meta.get("start_frame", args.start_frame))
+    args.frame_step  = int(meta.get("frame_step", args.frame_step))
+    args.recenter    = bool(meta.get("recenter", args.recenter))
+    args.mask_svg    = meta.get("mask_svg", args.mask_svg)
+    args.scale_smoothing = float(meta.get("scale_smoothing_render",
+                                           args.scale_smoothing))
+    args.loop_period = int(meta.get("loop_period", 0) or 0)
+    args.loop_start  = int(meta.get("loop_start", 0) or 0)
+    flower = meta.get("flower") or {}
+    if flower:
+        args.petals          = int(flower.get("petals", args.petals))
+        args.mirror_segments = bool(flower.get("mirror_segments",
+                                                args.mirror_segments))
+        args.interest_angle  = float(flower.get("interest_angle",
+                                                 args.interest_angle))
+        args.align_north     = flower.get("align_north", args.align_north)
+    extras = meta.get("extra_constants") or []
+    if extras:
+        args.extra_constants = json.dumps(extras)
+    args.series_name = os.path.basename(os.path.normpath(resume))
+    args._resume_folder = resume
+    args._resume_meta = meta
+    print(f"Resume: loaded parameters from {meta_path}")
+    return resume
+
+
 def render(args):
+    _apply_resume(args)
     gen_cls = GENERATORS[args.generator]
     gen_kwargs = build_gen_kwargs(args)
     smoothing = args.scale_smoothing
@@ -277,6 +335,24 @@ def render(args):
     for name in color_names:
         os.makedirs(os.path.join(folder, name), exist_ok=True)
     os.makedirs(os.path.join(folder, "_raw"), exist_ok=True)
+
+    # Write meta.json IMMEDIATELY so that an interrupted run is resumable
+    # even if it dies during pass 1.  We start with whatever per-frame
+    # bounds we already have (none on a fresh run, the previous values on
+    # a resumed run) and rewrite the file again after pass 1 with the
+    # newly computed bounds merged in.
+    _initial_bounds = dict(getattr(args, "_resume_meta", {}).get(
+        "per_frame_bounds", {}) or {})
+    # convert string keys to int for the writer's sake
+    _initial_bounds_int = {}
+    for k, v in _initial_bounds.items():
+        try:
+            _initial_bounds_int[int(k)] = (
+                None if v is None else (float(v[0]), float(v[1])))
+        except (TypeError, ValueError):
+            pass
+    _write_meta(folder, args, gen_kwargs, _initial_bounds_int)
+    print(f"Wrote initial meta.json -> {folder}/_raw/meta.json")
 
     # Persist the effective render mask (same radial-filled one used by
     # the workers) so colorize.py can force those pixels to black later.
@@ -329,21 +405,73 @@ def render(args):
               f"copying {len(frames_to_copy)} frames")
 
     total_start = clock()
-    n_render = len(frames_to_render)
     n_total = len(frames)
+
+    # ── Resume support: skip frames whose raw .npz already exists ─────────
+    is_resume = bool(getattr(args, "_resume_folder", None))
+    preexisting_bounds = {}
+    if is_resume:
+        meta = getattr(args, "_resume_meta", {}) or {}
+        pfb = meta.get("per_frame_bounds", {}) or {}
+        for k, v in pfb.items():
+            try:
+                preexisting_bounds[int(k)] = (
+                    None if v is None else (float(v[0]), float(v[1])))
+            except (TypeError, ValueError):
+                pass
+
+        # Recover bounds for any .npz on disk that has no entry in
+        # meta.json yet (e.g. frames copied in from an older interrupted
+        # run that pre-dates the upfront-meta patch).  Bounds are cheap
+        # to recompute from the stored counts.
+        missing = [f for f, _ in frames_to_render
+                   if f not in preexisting_bounds
+                   and os.path.isfile(_raw_path(folder, f))]
+        if missing:
+            print(f"Resume: recovering bounds for {len(missing)} "
+                  f"orphan .npz file(s)…")
+            for f in missing:
+                try:
+                    with np.load(_raw_path(folder, f)) as npz:
+                        counts = npz["counts"]
+                    preexisting_bounds[f] = _calc_bounds(counts, args.max_iter)
+                except Exception as exc:
+                    print(f"  ! frame {f}: could not recover bounds "
+                          f"({exc}); will re-render.")
+                    try:
+                        os.remove(_raw_path(folder, f))
+                    except OSError:
+                        pass
+
+        kept = []
+        skipped = 0
+        for f, s in frames_to_render:
+            if os.path.isfile(_raw_path(folder, f)):
+                skipped += 1
+            else:
+                kept.append((f, s))
+        if skipped:
+            print(f"Resume: {skipped} frame(s) already rendered, "
+                  f"{len(kept)} remaining.")
+        frames_to_render = kept
+
+    n_render = len(frames_to_render)
     n_workers = min(args.workers, max(n_render, 1))
 
     # Two-pass rendering is now always used – we need bounds smoothing for
     # the greyscale preview and for any additional colorizers.
     print(f"Pass 1: rendering counts + raw data…")
-    frame_bounds = {}
+    frame_bounds = dict(preexisting_bounds)  # start with whatever was on disk
 
-    if n_workers <= 1:
+    if n_render == 0:
+        print("  Nothing to render – all frames already on disk.")
+    elif n_workers <= 1:
         _worker_init(gen_cls, gen_kwargs, color_names, folder, args.mask_svg)
         for i, (frame, scale) in enumerate(frames_to_render, 1):
             c_f = frame_c[frame]
             f, bounds, elapsed = _worker_render_counts(frame, scale, c_f.real, c_f.imag)
             frame_bounds[f] = bounds
+            _write_meta(folder, args, gen_kwargs, frame_bounds)
             print(f"[{i}/{n_render}] frame {f:3d}  scale={scale:.6f}  ({elapsed:.1f}s)")
     else:
         done = 0
@@ -357,6 +485,7 @@ def render(args):
                 f, bounds, elapsed = fut.result()
                 frame_bounds[f] = bounds
                 done += 1
+                _write_meta(folder, args, gen_kwargs, frame_bounds)
                 scale = args.scale_start * (args.zoom_factor ** f)
                 print(f"[{done}/{n_render}] frame {f:3d}  "
                       f"scale={scale:.6f}  ({elapsed:.1f}s)")
@@ -370,15 +499,21 @@ def render(args):
 
     # ── Pass 2: colorize with smoothed bounds ────────────────────────
     print(f"Pass 2: colorizing with smoothed bounds…  colorizers={list(color_names)}")
-    colorize_tasks = [(f, smoothed.get(f)) for f, _ in frames_to_render if smoothed.get(f) is not None]
+    # Colorize every scheduled frame that has raw data on disk – this
+    # also covers frames that were rendered in a previous (interrupted)
+    # run but never made it to pass 2.
+    colorize_frames = [f for f, _ in frames
+                       if os.path.isfile(_raw_path(folder, f))
+                       and smoothed.get(f) is not None]
+    colorize_tasks = [(f, smoothed[f]) for f in colorize_frames]
 
     # Limit workers for colorize pass – each worker holds a full image
     # in memory plus several float32 temp arrays (~20 bytes/pixel).
     pixels = gen_kwargs.get("width", 640) * gen_kwargs.get("height", 640)
     mem_per_worker_mb = pixels * 20 / (1024 * 1024)  # rough estimate
     max_color_workers = max(1, int(2048 / max(mem_per_worker_mb, 1)))
-    n_color_workers = min(n_workers, max_color_workers, len(colorize_tasks))
-    if n_color_workers < n_workers:
+    n_color_workers = min(args.workers, max_color_workers, max(len(colorize_tasks), 1))
+    if n_color_workers < args.workers:
         print(f"  (limiting to {n_color_workers} workers for colorize to avoid OOM)")
 
     if n_color_workers <= 1:
@@ -477,6 +612,11 @@ def parse_args():
                         "[{c_real, c_imag, start, length}, ...]")
     p.add_argument("--series-name", type=str, default="",
                    help="Override the auto-generated series folder name under results/.")
+    p.add_argument("--resume", type=str, default="",
+                   help="Resume an interrupted render. Path to the existing "
+                        "<results/series> folder containing _raw/meta.json. "
+                        "All other parameters are recovered from meta.json; "
+                        "only --workers / --colorizers may still be passed.")
     return p.parse_args()
 
 
